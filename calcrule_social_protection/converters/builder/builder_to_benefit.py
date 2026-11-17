@@ -1,4 +1,5 @@
 from payroll.models import BenefitConsumptionStatus
+from calcrule_social_protection.converters.builder.dates import date_or_none
 
 
 class BuilderToBenefitConverter:
@@ -24,7 +25,7 @@ class BuilderToBenefitConverter:
     def _build_date_dates(cls, benefit, payment_plan, payment_cycle):
         benefit["date_due"] = f"{payment_cycle.end_date}"
         benefit["date_valid_from"] = f"{payment_plan.benefit_plan.date_valid_from}"
-        benefit["date_valid_to"] = f"{payment_plan.benefit_plan.date_valid_to}"
+        benefit["date_valid_to"] = date_or_none(payment_plan.benefit_plan.date_valid_to)
 
     @classmethod
     def _build_type(cls, benefit):

@@ -11,3 +11,6 @@ code is the beneficiary id: a bill carries no person name or group code.
 A payment above the payment plan's limit per single transaction is not billed at once: the bill and benefit are held
 in a task (source `calcrule_social_protection`) whose data is the string form of a Python dict. Completing the task
 creates the bill as validated, failing it creates the bill as cancelled, whatever characters the held values contain.
+
+A benefit plan without an end date is billed like any other: the bill, its line and the benefit carry no end of
+validity.

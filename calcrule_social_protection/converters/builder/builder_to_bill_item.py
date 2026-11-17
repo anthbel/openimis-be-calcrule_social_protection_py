@@ -1,4 +1,5 @@
 from django.contrib.contenttypes.models import ContentType
+from calcrule_social_protection.converters.builder.dates import date_or_none
 
 
 class BuilderToBillItemConverter:
@@ -34,4 +35,4 @@ class BuilderToBillItemConverter:
     @classmethod
     def _build_date_dates(cls, bill_line_item, payment_plan):
         bill_line_item["date_valid_from"] = f"{payment_plan.benefit_plan.date_valid_from}"
-        bill_line_item["date_valid_to"] = f"{payment_plan.benefit_plan.date_valid_to}"
+        bill_line_item["date_valid_to"] = date_or_none(payment_plan.benefit_plan.date_valid_to)
