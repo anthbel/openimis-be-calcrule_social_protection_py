@@ -1,8 +1,10 @@
+import datetime
+
 from django.test import TestCase
 from django.contrib.contenttypes.models import ContentType
 from core.test_helpers import LogInHelper
-from social_protection.models import Beneficiary, BenefitPlan, BeneficiaryStatus
-from individual.models import Individual
+from social_protection.models import Beneficiary, BenefitPlan, BeneficiaryStatus, GroupBeneficiary
+from individual.models import Group, GroupIndividual, Individual
 from invoice.models import Bill, BillItem
 from payroll.models import (
     Payroll, BenefitConsumption, BenefitAttachment,
@@ -11,7 +13,10 @@ from payroll.models import (
 from contribution_plan.models import PaymentPlan
 from payment_cycle.models import PaymentCycle
 from calcrule_social_protection.strategies.benefit_package_individual_strategy import IndividualBenefitPackageStrategy
+from calcrule_social_protection.strategies.benefit_package_group_strategy import GroupBenefitPackageStrategy
 from calcrule_social_protection.calculation_rule import SocialProtectionCalculationRule
+from tasks_management.models import Task
+from tasks_management.services import TaskService
 
 
 class BenefitPackageStrategyTests(TestCase):
@@ -247,3 +252,109 @@ class BenefitPackageStrategyTests(TestCase):
         self.assertEqual(payment_b2, 100.0)
         self.assertFalse(is_exceed_b2, "b2 should not exceed limit (100 < 150)")
 
+
+class BillDataTests(TestCase):
+    """The bills of a payment plan, created directly or when the task holding a payment above the limit per
+    transaction is completed. Names and codes carry apostrophes; the bills carry no name or group code."""
+
+    END_DATE = datetime.date(2026, 1, 31)
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = LogInHelper().get_or_create_user_api(username='admin_bill_data')
+        cls.cycle = PaymentCycle(code="BD-C", start_date=datetime.date(2026, 1, 1), end_date=cls.END_DATE,
+                                 type=ContentType.objects.get_for_model(BenefitPlan))
+        cls.cycle.save(user=cls.user)
+
+        cls.plan = BenefitPlan(code="N'GOZI", name="Plan N'Gozi", date_valid_from="2020-01-01", date_valid_to="2030-12-31",
+                               type=BenefitPlan.BenefitPlanType.INDIVIDUAL_TYPE)
+        cls.plan.save(user=cls.user)
+        cls.person = Individual(first_name="Aimée", last_name="N'Dayi-Ke", dob="1990-01-01")
+        cls.person.save(user=cls.user)
+        cls.beneficiary = Beneficiary(individual=cls.person, benefit_plan=cls.plan,
+                                      status=BeneficiaryStatus.ACTIVE, json_ext={})
+        cls.beneficiary.save(user=cls.user)
+
+        cls.group_plan = BenefitPlan(code="G'GOZI", name="Group plan", date_valid_from="2020-01-01", date_valid_to="2030-12-31",
+                                     type=BenefitPlan.BenefitPlanType.GROUP_TYPE)
+        cls.group_plan.save(user=cls.user)
+        cls.group = Group(code="HH-N'DAYI", json_ext={})
+        cls.group.save(user=cls.user)
+        GroupIndividual(group=cls.group, individual=cls.person, role=GroupIndividual.Role.HEAD).save(user=cls.user)
+        cls.group_beneficiary = GroupBeneficiary(group=cls.group, benefit_plan=cls.group_plan,
+                                                 status=BeneficiaryStatus.ACTIVE, json_ext={})
+        cls.group_beneficiary.save(user=cls.user)
+
+    def payroll(self, plan):
+        payment_plan = PaymentPlan(code=f"{plan.code}-PP", name="Payment plan", benefit_plan=plan, periodicity=1,
+                                   calculation=SocialProtectionCalculationRule.uuid,
+                                   json_ext={"calculation_rule": {"fixed_batch": 100,
+                                                                  "limit_per_single_transaction": ""}})
+        payment_plan.save(user=self.user)
+        payroll = Payroll(name=f"{plan.code}-P", payment_plan=payment_plan, payment_cycle=self.cycle)
+        payroll.save(user=self.user)
+        return payment_plan, payroll
+
+    def held_payment(self, strategy, plan, **entity):
+        """Converts a payment above the limit, which holds the bill in a task, and returns the task."""
+        payment_plan, payroll = self.payroll(plan)
+        strategy.convert(payment_plan, amount=150.0, user=self.user, end_date=self.END_DATE,
+                         payment_cycle=self.cycle, payroll=payroll, is_exceed_limit=True, **entity)
+        return Task.objects.get(entity_id=str(payroll.id), source='calcrule_social_protection'), payroll
+
+    def bill_of(self, unit):
+        return Bill.objects.get(subject_id=str(unit.id), is_deleted=False)
+
+    def test_completing_the_task_creates_the_bill_with_apostrophes_in_names_and_codes(self):
+        task, payroll = self.held_payment(IndividualBenefitPackageStrategy, self.plan, beneficiary=self.beneficiary)
+        self.assertFalse(Bill.objects.filter(subject_id=str(self.beneficiary.id)).exists())
+
+        result = TaskService(self.user).complete_task({'id': task.id})
+
+        self.assertTrue(result['success'], result)
+        bill = self.bill_of(self.beneficiary)
+        self.assertEqual(bill.status, Bill.Status.VALIDATED)
+        self.assertEqual(bill.amount_net, 150)
+        self.assertTrue(bill.terms.startswith("N'GOZI-2026-01-31: "))
+        self.assertTrue(PayrollBenefitConsumption.objects.filter(
+            payroll=payroll, benefit__benefitattachment__bill=bill).exists())
+
+    def test_a_failed_task_creates_the_bill_cancelled(self):
+        task, _ = self.held_payment(GroupBenefitPackageStrategy, self.group_plan, group=self.group_beneficiary)
+
+        TaskService(self.user).complete_task({'id': task.id, 'failed': True})
+
+        self.assertEqual(self.bill_of(self.group_beneficiary).status, Bill.Status.CANCELLED)
+
+    def assert_no_name_or_group_code(self, unit, plan):
+        bill = self.bill_of(unit)
+        self.assertEqual(bill.terms, f"{plan.code}-{self.END_DATE}: {unit.id}")
+        self.assertEqual([item.code for item in BillItem.objects.filter(bill=bill)], [f"{unit.id}"])
+        for value in (bill.terms, *BillItem.objects.filter(bill=bill).values_list("code", flat=True)):
+            for name in (self.person.first_name, self.person.last_name, self.group.code):
+                self.assertNotIn(name, value)
+
+    def test_a_beneficiary_bill_carries_no_name(self):
+        payment_plan, payroll = self.payroll(self.plan)
+        IndividualBenefitPackageStrategy.calculate(
+            SocialProtectionCalculationRule, payment_plan, user_id=self.user.id, end_date=self.END_DATE,
+            payment_cycle=self.cycle, payroll=payroll)
+
+        self.assert_no_name_or_group_code(self.beneficiary, self.plan)
+
+    def test_a_group_beneficiary_bill_carries_no_group_code_or_name(self):
+        payment_plan, payroll = self.payroll(self.group_plan)
+        GroupBenefitPackageStrategy.calculate(
+            SocialProtectionCalculationRule, payment_plan, user_id=self.user.id, end_date=self.END_DATE,
+            payment_cycle=self.cycle, payroll=payroll)
+
+        self.assert_no_name_or_group_code(self.group_beneficiary, self.group_plan)
+
+    def test_a_held_bill_carries_no_name_once_its_task_is_completed(self):
+        task, _ = self.held_payment(IndividualBenefitPackageStrategy, self.plan, beneficiary=self.beneficiary)
+        for name in (self.person.first_name, self.person.last_name):
+            self.assertNotIn(name, task.data)
+
+        TaskService(self.user).complete_task({'id': task.id})
+
+        self.assert_no_name_or_group_code(self.beneficiary, self.plan)

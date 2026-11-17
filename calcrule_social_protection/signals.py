@@ -1,4 +1,4 @@
-import json
+import ast
 import logging
 
 from calcrule_social_protection.apps import CalcruleSocialProtectionConfig
@@ -36,9 +36,7 @@ def bind_service_signals():
             if result \
                     and result['success'] \
                     and task['business_event'] == CalcruleSocialProtectionConfig.calculate_business_event:
-                convert_results = task['data']
-                convert_results = convert_results.replace("'", '"')
-                convert_results = json.loads(convert_results)
+                convert_results = ast.literal_eval(task['data'])
                 task_status = task['status']
                 convert_benefit = convert_results.pop("benefit", None)
                 payroll_id = convert_results.pop("payroll_id", None)
