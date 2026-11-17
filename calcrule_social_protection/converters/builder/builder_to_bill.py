@@ -1,6 +1,7 @@
 from django.contrib.contenttypes.models import ContentType
 from invoice.apps import InvoiceConfig
 from invoice.models import Bill
+from calcrule_social_protection.converters.builder.dates import date_or_none
 
 
 class BuilderToBillConverter:
@@ -42,7 +43,7 @@ class BuilderToBillConverter:
         bill["date_due"] = f"{payment_cycle.end_date}"
         bill["date_bill"] = f"{payment_cycle.start_date}"
         bill["date_valid_from"] = f"{payment_plan.benefit_plan.date_valid_from}"
-        bill["date_valid_to"] = f"{payment_plan.benefit_plan.date_valid_to}"
+        bill["date_valid_to"] = date_or_none(payment_plan.benefit_plan.date_valid_to)
 
     @classmethod
     def _build_currency(cls, bill):

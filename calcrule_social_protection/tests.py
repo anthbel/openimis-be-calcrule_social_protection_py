@@ -253,7 +253,7 @@ class BenefitPackageStrategyTests(TestCase):
         self.assertFalse(is_exceed_b2, "b2 should not exceed limit (100 < 150)")
 
 
-class BillDataTests(TestCase):
+class BillDataFixture(TestCase):
     """The bills of a payment plan, created directly or when the task holding a payment above the limit per
     transaction is completed. Names and codes carry apostrophes; the bills carry no name or group code."""
 
@@ -304,6 +304,9 @@ class BillDataTests(TestCase):
 
     def bill_of(self, unit):
         return Bill.objects.get(subject_id=str(unit.id), is_deleted=False)
+
+
+class BillDataTests(BillDataFixture):
 
     def test_completing_the_task_creates_the_bill_with_apostrophes_in_names_and_codes(self):
         task, payroll = self.held_payment(IndividualBenefitPackageStrategy, self.plan, beneficiary=self.beneficiary)
@@ -358,3 +361,44 @@ class BillDataTests(TestCase):
         TaskService(self.user).complete_task({'id': task.id})
 
         self.assert_no_name_or_group_code(self.beneficiary, self.plan)
+
+
+class OpenEndedPlanBillTests(BillDataFixture):
+    """A benefit plan without an end date bills like any other: the bill and its line carry no end of validity."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        for plan in (cls.plan, cls.group_plan):
+            plan.date_valid_to = None
+            plan.save(user=cls.user)
+
+    def assert_open_ended(self, unit):
+        bill = self.bill_of(unit)
+        self.assertIsNone(bill.date_valid_to)
+        self.assertGreater(bill.amount_net, 0)
+        self.assertEqual([item.date_valid_to for item in BillItem.objects.filter(bill=bill)], [None])
+
+    def test_an_individual_bill_is_created(self):
+        payment_plan, payroll = self.payroll(self.plan)
+        IndividualBenefitPackageStrategy.calculate(
+            SocialProtectionCalculationRule, payment_plan, user_id=self.user.id, end_date=self.END_DATE,
+            payment_cycle=self.cycle, payroll=payroll)
+
+        self.assert_open_ended(self.beneficiary)
+
+    def test_a_group_bill_is_created(self):
+        payment_plan, payroll = self.payroll(self.group_plan)
+        GroupBenefitPackageStrategy.calculate(
+            SocialProtectionCalculationRule, payment_plan, user_id=self.user.id, end_date=self.END_DATE,
+            payment_cycle=self.cycle, payroll=payroll)
+
+        self.assert_open_ended(self.group_beneficiary)
+
+    def test_a_held_bill_is_created_when_its_task_is_completed(self):
+        task, _ = self.held_payment(IndividualBenefitPackageStrategy, self.plan, beneficiary=self.beneficiary)
+
+        result = TaskService(self.user).complete_task({'id': task.id})
+
+        self.assertTrue(result['success'], result)
+        self.assert_open_ended(self.beneficiary)
